@@ -99,7 +99,7 @@ func NewEd25519Generator() *Ed25519Generator {
 	return &Ed25519Generator{}
 }
 
-func (g *Ed25519Generator) Generate() (common.Result, bool) {
+func (g *Ed25519Generator) TryMatch(prefix string) (common.Result, bool) {
 	br := randPool.Get().(*bufferedRand)
 	pub, priv, err := ed25519.GenerateKey(br)
 	randPool.Put(br)
@@ -107,13 +107,44 @@ func (g *Ed25519Generator) Generate() (common.Result, bool) {
 		panic(err)
 	}
 
-	fingerprint := g.calculateFingerprint(pub)
+	// Compute the SSH fingerprint's SHA256 and base64-encode it into a stack
+	// buffer so a miss allocates no fingerprint string.
+	h := sha256Pool.Get().(hash.Hash)
+	h.Reset()
+	h.Write(sshEd25519KeyTypeLen)
+	h.Write(sshEd25519KeyType)
+	h.Write(sshEd25519KeyDataLen)
+	h.Write(pub)
+	var sum [32]byte
+	digest := h.Sum(sum[:0])
+	sha256Pool.Put(h)
 
+	var b64 [44]byte // base64 of 32 bytes = 44 chars
+	base64.StdEncoding.Encode(b64[:], digest)
+
+	if !hasBytePrefix(b64[:], prefix) {
+		return nil, false
+	}
+
+	// Match (rare): materialize the full result.
 	return &Ed25519Result{
 		PublicKey:   pub,
 		PrivateKey:  priv,
-		Fingerprint: fingerprint,
+		Fingerprint: string(b64[:]),
 	}, true
+}
+
+// hasBytePrefix reports whether b starts with prefix, without allocation.
+func hasBytePrefix(b []byte, prefix string) bool {
+	if len(prefix) > len(b) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if b[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *Ed25519Generator) ValidatePrefix(prefix string) error {
@@ -160,25 +191,6 @@ func (g *Ed25519Generator) isValidBase64(s string) bool {
 		}
 	}
 	return true
-}
-
-func (g *Ed25519Generator) calculateFingerprint(pubKey ed25519.PublicKey) string {
-	// Get SHA256 hasher from pool
-	h := sha256Pool.Get().(hash.Hash)
-	defer func() {
-		h.Reset() // Reset for reuse
-		sha256Pool.Put(h)
-	}()
-
-	// SSH public key format: type_len + type + data_len + data
-	h.Write(sshEd25519KeyTypeLen)
-	h.Write(sshEd25519KeyType)
-	h.Write(sshEd25519KeyDataLen)
-	h.Write(pubKey)
-
-	// Pre-allocate exact size buffer (SHA256 = 32 bytes)
-	hashBytes := h.Sum(make([]byte, 0, 32))
-	return base64.StdEncoding.EncodeToString(hashBytes)
 }
 
 func (r *Ed25519Result) formatPublicKey() string {

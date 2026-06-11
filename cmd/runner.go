@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -91,7 +90,7 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 
 				// Process a batch of generations
 				for batch := 0; batch < batchSize; batch++ {
-					result, matches := generator.Generate()
+					result, ok := generator.TryMatch(prefix)
 					localAttempts++
 
 					// Flush to shared atomic periodically to reduce cache-line contention
@@ -100,7 +99,7 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 						localAttempts = 0
 					}
 
-					if matches && strings.HasPrefix(result.GetValue(), prefix) {
+					if ok {
 						stats.Attempts.Add(localAttempts)
 						// Try to send result, exit if already found
 						select {
@@ -190,7 +189,7 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 
 				// Process a batch of generations
 				for batch := 0; batch < batchSize; batch++ {
-					result, matches := generator.Generate()
+					result, ok := generator.TryMatch(prefix)
 					localAttempts++
 					localCurrent++
 
@@ -202,7 +201,7 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 						localCurrent = 0
 					}
 
-					if matches && strings.HasPrefix(result.GetValue(), prefix) {
+					if ok {
 						multiStats.Attempts.Add(localAttempts)
 						multiStats.CurrentAttempts.Add(localCurrent)
 						localAttempts = 0

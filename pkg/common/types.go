@@ -8,8 +8,11 @@ import (
 
 // Generator defines the interface for different key/hash generators
 type Generator interface {
-	// Generate creates a new instance and checks if it matches the prefix
-	Generate() (Result, bool)
+	// TryMatch generates one candidate and reports whether it matches prefix.
+	// On a match it returns a fully-built Result; on a miss it returns
+	// (nil, false) and avoids heap allocations to minimize GC pressure in
+	// the hot search loop.
+	TryMatch(prefix string) (Result, bool)
 
 	// ValidatePrefix checks if the prefix is valid for this generator type
 	ValidatePrefix(prefix string) error
@@ -41,38 +44,38 @@ type Result interface {
 
 // FoundResult represents a result with timing information
 type FoundResult struct {
-	Result    Result
-	FoundAt   time.Time
-	Attempts  int64
+	Result   Result
+	FoundAt  time.Time
+	Attempts int64
 }
 
 // ProbabilityStats contains probability calculations
 type ProbabilityStats struct {
-	P75         float64 // 75% probability
-	P99         float64 // 99% probability
-	PrefixBits  float64 // Bits of entropy in prefix
+	P75        float64 // 75% probability
+	P99        float64 // 99% probability
+	PrefixBits float64 // Bits of entropy in prefix
 }
 
 // MultiStats holds runtime statistics for multiple result searches
 type MultiStats struct {
 	Attempts         *atomic.Int64
 	StartTime        time.Time
-	CurrentSearch    *atomic.Int32    // Which result we're currently searching for (1-based)
-	TotalTargets     int              // Total number of results to find
-	FoundResults     []FoundResult    // Results found so far
+	CurrentSearch    *atomic.Int32 // Which result we're currently searching for (1-based)
+	TotalTargets     int           // Total number of results to find
+	FoundResults     []FoundResult // Results found so far
 	Context          context.Context
 	Cancel           context.CancelFunc
-	CurrentStartTime time.Time        // Start time for current search
-	CurrentAttempts  *atomic.Int64    // Attempts for current search only
+	CurrentStartTime time.Time     // Start time for current search
+	CurrentAttempts  *atomic.Int64 // Attempts for current search only
 }
 
 // Stats holds runtime statistics (kept for backward compatibility)
 type Stats struct {
-	Attempts      *atomic.Int64
-	StartTime     time.Time
-	Found         *atomic.Value // stores Result when found
-	Context       context.Context
-	Cancel        context.CancelFunc
+	Attempts  *atomic.Int64
+	StartTime time.Time
+	Found     *atomic.Value // stores Result when found
+	Context   context.Context
+	Cancel    context.CancelFunc
 }
 
 // NewMultiStats creates a new MultiStats instance

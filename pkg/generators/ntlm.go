@@ -4,20 +4,15 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"math/rand"
+	"runtime"
 	"sync"
-	"unicode/utf16"
+	"time"
 
 	"golang.org/x/crypto/md4"
 
 	"github.com/charlielowe/uniq/pkg/common"
 )
-
-// MD4 hash object pool for reuse
-var md4Pool = sync.Pool{
-	New: func() interface{} {
-		return md4.New()
-	},
-}
 
 // Custom uppercase hex encoder - avoids strings.ToUpper allocation
 const hexCharsUpper = "0123456789ABCDEF"
@@ -29,6 +24,49 @@ func hexEncodeUpper(src []byte) string {
 		dst[i*2+1] = hexCharsUpper[b&0x0f]
 	}
 	return string(dst)
+}
+
+// ntlmScratch holds all per-worker reusable state for the hot loop so that a
+// candidate can be generated, hashed, and prefix-checked with zero heap
+// allocations. Instances are pooled per-P; each is only ever used by one
+// goroutine at a time (sync.Pool removes it on Get), so the non-concurrent
+// *rand.Rand and hasher are safe.
+type ntlmScratch struct {
+	rng    *rand.Rand
+	hasher hash.Hash
+	pw     [16]byte // ASCII password bytes
+	u16    [32]byte // UTF-16LE of pw; odd (high) bytes stay zero for ASCII
+}
+
+var ntlmScratchPool = sync.Pool{
+	New: func() interface{} {
+		return &ntlmScratch{
+			rng:    rand.New(rand.NewSource(time.Now().UnixNano() + int64(runtime.NumGoroutine()))),
+			hasher: md4.New(),
+		}
+	},
+}
+
+// matchNTLMPrefix reports whether the uppercase hex encoding of sum begins with
+// prefix, without allocating an intermediate hex string. prefix is expected to
+// be uppercase hex (the ntlm command uppercases it).
+func matchNTLMPrefix(sum []byte, prefix string) bool {
+	if len(prefix) > len(sum)*2 {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		b := sum[i/2]
+		var nib byte
+		if i&1 == 0 {
+			nib = b >> 4
+		} else {
+			nib = b & 0x0f
+		}
+		if hexCharsUpper[nib] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type NTLMGenerator struct{}
@@ -57,13 +95,37 @@ func NewNTLMGenerator() *NTLMGenerator {
 	return &NTLMGenerator{}
 }
 
-func (g *NTLMGenerator) Generate() (common.Result, bool) {
-	password := common.GenerateRandomString(16)
-	hash := g.ntlmHash(password)
-	return &NTLMResult{
-		Password: password,
-		Hash:     hash,
-	}, true
+func (g *NTLMGenerator) TryMatch(prefix string) (common.Result, bool) {
+	s := ntlmScratchPool.Get().(*ntlmScratch)
+
+	// Random 16-char ASCII password directly into the scratch buffer.
+	for i := range s.pw {
+		s.pw[i] = common.Charset[s.rng.Intn(len(common.Charset))]
+	}
+
+	// UTF-16LE encoding: for ASCII each byte maps to (byte, 0x00). The odd
+	// (high) bytes of u16 are never written and remain zero.
+	for i := 0; i < len(s.pw); i++ {
+		s.u16[i*2] = s.pw[i]
+	}
+
+	s.hasher.Reset()
+	s.hasher.Write(s.u16[:])
+	var sum [16]byte
+	digest := s.hasher.Sum(sum[:0])
+
+	if !matchNTLMPrefix(digest, prefix) {
+		ntlmScratchPool.Put(s)
+		return nil, false
+	}
+
+	// Match (rare): now it's worth allocating the real result.
+	res := &NTLMResult{
+		Password: string(s.pw[:]),
+		Hash:     hexEncodeUpper(digest),
+	}
+	ntlmScratchPool.Put(s)
+	return res, true
 }
 
 func (g *NTLMGenerator) ValidatePrefix(prefix string) error {
@@ -108,25 +170,4 @@ func (g *NTLMGenerator) isValidHex(s string) bool {
 		}
 	}
 	return true
-}
-
-func (g *NTLMGenerator) ntlmHash(password string) string {
-	// Get MD4 hasher from pool
-	h := md4Pool.Get().(hash.Hash)
-	defer func() {
-		h.Reset() // Reset for reuse
-		md4Pool.Put(h)
-	}()
-
-	utf16Password := utf16.Encode([]rune(password))
-
-	// Write UTF-16 bytes directly without additional allocations
-	for _, r := range utf16Password {
-		// Write little-endian directly to avoid buffer allocation
-		h.Write([]byte{byte(r), byte(r >> 8)})
-	}
-
-	// Pre-allocate exact size buffer (MD4 = 16 bytes)
-	hashBytes := h.Sum(make([]byte, 0, 16))
-	return hexEncodeUpper(hashBytes)
 }
