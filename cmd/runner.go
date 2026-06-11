@@ -56,7 +56,6 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 	var resultsMutex sync.Mutex
 
 	numCPU := runtime.NumCPU()
-	runtime.GOMAXPROCS(numCPU)
 
 	// Handle interrupts
 	go func() {
@@ -76,12 +75,16 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			const batchSize = 1000 // Process in batches to reduce cancellation checks
+			const batchSize = 1000    // Process in batches to reduce cancellation checks
+			const flushInterval = 100 // Flush local counter to shared atomic every N iterations
+
+			var localAttempts int64
 
 			for {
 				// Check cancellation less frequently for better performance
 				select {
 				case <-stats.Context.Done():
+					stats.Attempts.Add(localAttempts)
 					return
 				default:
 				}
@@ -89,9 +92,16 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 				// Process a batch of generations
 				for batch := 0; batch < batchSize; batch++ {
 					result, matches := generator.Generate()
-					stats.Attempts.Add(1)
+					localAttempts++
+
+					// Flush to shared atomic periodically to reduce cache-line contention
+					if localAttempts >= flushInterval {
+						stats.Attempts.Add(localAttempts)
+						localAttempts = 0
+					}
 
 					if matches && strings.HasPrefix(result.GetValue(), prefix) {
+						stats.Attempts.Add(localAttempts)
 						// Try to send result, exit if already found
 						select {
 						case found <- result:
@@ -147,7 +157,6 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 	var resultsMutex sync.Mutex
 
 	numCPU := runtime.NumCPU()
-	runtime.GOMAXPROCS(numCPU)
 
 	// Handle interrupts
 	go func() {
@@ -164,12 +173,17 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			const batchSize = 1000 // Process in batches
+			const batchSize = 1000    // Process in batches
+			const flushInterval = 100 // Flush local counters to shared atomics every N iterations
+
+			var localAttempts, localCurrent int64
 
 			for {
 				// Check cancellation less frequently
 				select {
 				case <-multiStats.Context.Done():
+					multiStats.Attempts.Add(localAttempts)
+					multiStats.CurrentAttempts.Add(localCurrent)
 					return
 				default:
 				}
@@ -177,10 +191,23 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 				// Process a batch of generations
 				for batch := 0; batch < batchSize; batch++ {
 					result, matches := generator.Generate()
-					multiStats.Attempts.Add(1)
-					multiStats.CurrentAttempts.Add(1)
+					localAttempts++
+					localCurrent++
+
+					// Flush to shared atomics periodically to reduce cache-line contention
+					if localAttempts >= flushInterval {
+						multiStats.Attempts.Add(localAttempts)
+						multiStats.CurrentAttempts.Add(localCurrent)
+						localAttempts = 0
+						localCurrent = 0
+					}
 
 					if matches && strings.HasPrefix(result.GetValue(), prefix) {
+						multiStats.Attempts.Add(localAttempts)
+						multiStats.CurrentAttempts.Add(localCurrent)
+						localAttempts = 0
+						localCurrent = 0
+
 						resultsMutex.Lock()
 						if !multiStats.IsComplete() {
 							multiStats.AddResult(result)

@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"hash"
+	"io"
 	"math"
 	"strings"
 	"sync"
@@ -23,11 +24,51 @@ var sha256Pool = sync.Pool{
 	},
 }
 
+// bufferedRand serves cryptographically secure random bytes from a local
+// buffer that is refilled in large chunks from crypto/rand. ed25519 key
+// generation needs 32 bytes of entropy per key; reading those 32 bytes
+// directly from crypto/rand.Reader on every iteration crosses the Go<->libc
+// boundary (arc4random_buf on macOS) once per key, which does not scale
+// across many cores (and is catastrophic across the two dies of an M-series
+// Ultra). Batching the OS reads keeps full cryptographic quality (the seeds
+// still come straight from the OS CSPRNG) while reducing boundary crossings
+// by randBufSize/32.
+const randBufSize = 16384 // 512 ed25519 seeds per OS read
+
+type bufferedRand struct {
+	buf [randBufSize]byte
+	pos int
+}
+
+func (r *bufferedRand) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		if r.pos >= len(r.buf) {
+			if _, err := io.ReadFull(rand.Reader, r.buf[:]); err != nil {
+				return n, err
+			}
+			r.pos = 0
+		}
+		c := copy(p[n:], r.buf[r.pos:])
+		r.pos += c
+		n += c
+	}
+	return n, nil
+}
+
+// randPool holds per-P buffered entropy readers so workers don't share state.
+var randPool = sync.Pool{
+	New: func() interface{} {
+		// pos == len(buf) forces a refill on first use.
+		return &bufferedRand{pos: randBufSize}
+	},
+}
+
 // Pre-computed SSH key format constants
 var (
-	sshEd25519KeyType     = []byte("ssh-ed25519")
-	sshEd25519KeyTypeLen  = []byte{0, 0, 0, 11} // len("ssh-ed25519")
-	sshEd25519KeyDataLen  = []byte{0, 0, 0, 32} // ed25519 public key is 32 bytes
+	sshEd25519KeyType    = []byte("ssh-ed25519")
+	sshEd25519KeyTypeLen = []byte{0, 0, 0, 11} // len("ssh-ed25519")
+	sshEd25519KeyDataLen = []byte{0, 0, 0, 32} // ed25519 public key is 32 bytes
 )
 
 type Ed25519Generator struct{}
@@ -59,7 +100,9 @@ func NewEd25519Generator() *Ed25519Generator {
 }
 
 func (g *Ed25519Generator) Generate() (common.Result, bool) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	br := randPool.Get().(*bufferedRand)
+	pub, priv, err := ed25519.GenerateKey(br)
+	randPool.Put(br)
 	if err != nil {
 		panic(err)
 	}
