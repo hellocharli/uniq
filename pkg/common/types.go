@@ -32,12 +32,6 @@ type Generator interface {
 
 // Result represents a generated key/hash result
 type Result interface {
-	// String returns a human-readable representation
-	String() string
-
-	// GetValue returns the main value (hash, fingerprint, etc.)
-	GetValue() string
-
 	// GetDetails returns additional details to display
 	GetDetails() []string
 }
@@ -45,22 +39,19 @@ type Result interface {
 // FoundResult represents a result with timing information
 type FoundResult struct {
 	Result   Result
-	FoundAt  time.Time
 	Attempts int64
 }
 
 // ProbabilityStats contains probability calculations
 type ProbabilityStats struct {
-	P75        float64 // 75% probability
-	P99        float64 // 99% probability
-	PrefixBits float64 // Bits of entropy in prefix
+	P75 float64 // 75% probability
+	P99 float64 // 99% probability
 }
 
 // MultiStats holds runtime statistics for multiple result searches
 type MultiStats struct {
 	Attempts         *atomic.Int64
 	StartTime        time.Time
-	CurrentSearch    *atomic.Int32 // Which result we're currently searching for (1-based)
 	TotalTargets     int           // Total number of results to find
 	FoundResults     []FoundResult // Results found so far
 	Context          context.Context
@@ -73,7 +64,6 @@ type MultiStats struct {
 type Stats struct {
 	Attempts  *atomic.Int64
 	StartTime time.Time
-	Found     *atomic.Value // stores Result when found
 	Context   context.Context
 	Cancel    context.CancelFunc
 }
@@ -85,7 +75,6 @@ func NewMultiStats(totalTargets int) *MultiStats {
 	return &MultiStats{
 		Attempts:         &atomic.Int64{},
 		StartTime:        now,
-		CurrentSearch:    &atomic.Int32{},
 		TotalTargets:     totalTargets,
 		FoundResults:     make([]FoundResult, 0, totalTargets),
 		Context:          ctx,
@@ -101,7 +90,6 @@ func NewStats() *Stats {
 	return &Stats{
 		Attempts:  &atomic.Int64{},
 		StartTime: time.Now(),
-		Found:     &atomic.Value{},
 		Context:   ctx,
 		Cancel:    cancel,
 	}
@@ -111,7 +99,6 @@ func NewStats() *Stats {
 func (ms *MultiStats) AddResult(result Result) {
 	foundResult := FoundResult{
 		Result:   result,
-		FoundAt:  time.Now(),
 		Attempts: ms.CurrentAttempts.Load(),
 	}
 
@@ -119,15 +106,9 @@ func (ms *MultiStats) AddResult(result Result) {
 
 	// Start looking for next result (only if we need more)
 	if len(ms.FoundResults) < ms.TotalTargets {
-		ms.CurrentSearch.Add(1)
 		ms.CurrentStartTime = time.Now()
 		ms.CurrentAttempts.Store(0)
 	}
-}
-
-// GetCurrentSearch returns which result we're currently searching for (1-based)
-func (ms *MultiStats) GetCurrentSearch() int {
-	return int(ms.CurrentSearch.Load()) + 1
 }
 
 // IsComplete returns true if we've found all target results

@@ -17,13 +17,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// SHA256 hash object pool for reuse
-var sha256Pool = sync.Pool{
-	New: func() interface{} {
-		return sha256.New()
-	},
-}
-
 // bufferedRand serves cryptographically secure random bytes from a local
 // buffer that is refilled in large chunks from crypto/rand. ed25519 key
 // generation needs 32 bytes of entropy per key; reading those 32 bytes
@@ -56,11 +49,26 @@ func (r *bufferedRand) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// randPool holds per-P buffered entropy readers so workers don't share state.
-var randPool = sync.Pool{
+// edScratch bundles all per-worker reusable state for the hot loop: the
+// buffered entropy reader, the SHA-256 hasher, and stack-sized scratch buffers
+// for the seed, the digest, and its base64 encoding. Pooling these means a miss
+// only allocates the 64-byte private key that ed25519.NewKeyFromSeed must
+// return (stdlib has no public-key-only-from-seed entry point).
+type edScratch struct {
+	rand bufferedRand
+	h    hash.Hash
+	seed [32]byte
+	sum  [32]byte
+	b64  [44]byte // base64 of 32 bytes = 44 chars
+}
+
+// scratchPool holds per-P edScratch instances so workers don't share state.
+var scratchPool = sync.Pool{
 	New: func() interface{} {
-		// pos == len(buf) forces a refill on first use.
-		return &bufferedRand{pos: randBufSize}
+		// pos == len(buf) forces an entropy refill on first use.
+		s := &edScratch{h: sha256.New()}
+		s.rand.pos = randBufSize
+		return s
 	},
 }
 
@@ -79,14 +87,6 @@ type Ed25519Result struct {
 	Fingerprint string
 }
 
-func (r *Ed25519Result) String() string {
-	return fmt.Sprintf("Found matching key pair!\nFingerprint: SHA256:%s", r.Fingerprint)
-}
-
-func (r *Ed25519Result) GetValue() string {
-	return r.Fingerprint
-}
-
 func (r *Ed25519Result) GetDetails() []string {
 	return []string{
 		fmt.Sprintf("Fingerprint : %s", r.Fingerprint),
@@ -100,38 +100,40 @@ func NewEd25519Generator() *Ed25519Generator {
 }
 
 func (g *Ed25519Generator) TryMatch(prefix string) (common.Result, bool) {
-	br := randPool.Get().(*bufferedRand)
-	pub, priv, err := ed25519.GenerateKey(br)
-	randPool.Put(br)
-	if err != nil {
+	s := scratchPool.Get().(*edScratch)
+
+	// Derive the key directly from our own buffered seed. NewKeyFromSeed only
+	// allocates the 64-byte private key (pub is its second half), avoiding the
+	// extra seed/pub allocations that ed25519.GenerateKey performs.
+	if _, err := s.rand.Read(s.seed[:]); err != nil {
 		panic(err)
 	}
+	priv := ed25519.NewKeyFromSeed(s.seed[:])
+	pub := priv[32:]
 
-	// Compute the SSH fingerprint's SHA256 and base64-encode it into a stack
-	// buffer so a miss allocates no fingerprint string.
-	h := sha256Pool.Get().(hash.Hash)
-	h.Reset()
-	h.Write(sshEd25519KeyTypeLen)
-	h.Write(sshEd25519KeyType)
-	h.Write(sshEd25519KeyDataLen)
-	h.Write(pub)
-	var sum [32]byte
-	digest := h.Sum(sum[:0])
-	sha256Pool.Put(h)
+	// Compute the SSH fingerprint's SHA256 and base64-encode it into pooled
+	// scratch buffers so a miss allocates nothing beyond the priv key above.
+	s.h.Reset()
+	s.h.Write(sshEd25519KeyTypeLen)
+	s.h.Write(sshEd25519KeyType)
+	s.h.Write(sshEd25519KeyDataLen)
+	s.h.Write(pub)
+	digest := s.h.Sum(s.sum[:0])
+	base64.StdEncoding.Encode(s.b64[:], digest)
 
-	var b64 [44]byte // base64 of 32 bytes = 44 chars
-	base64.StdEncoding.Encode(b64[:], digest)
-
-	if !hasBytePrefix(b64[:], prefix) {
+	if !hasBytePrefix(s.b64[:], prefix) {
+		scratchPool.Put(s)
 		return nil, false
 	}
 
-	// Match (rare): materialize the full result.
-	return &Ed25519Result{
-		PublicKey:   pub,
+	// Match (rare): materialize the full result before returning scratch.
+	res := &Ed25519Result{
+		PublicKey:   ed25519.PublicKey(pub),
 		PrivateKey:  priv,
-		Fingerprint: string(b64[:]),
-	}, true
+		Fingerprint: string(s.b64[:]),
+	}
+	scratchPool.Put(s)
+	return res, true
 }
 
 // hasBytePrefix reports whether b starts with prefix, without allocation.
@@ -161,13 +163,11 @@ func (g *Ed25519Generator) ValidatePrefix(prefix string) error {
 
 func (g *Ed25519Generator) CalculateProbabilities(prefix string) common.ProbabilityStats {
 	// Each character in base64 represents ~6 bits of entropy
-	prefixBits := float64(len(prefix)) * 6
-	totalCombinations := math.Pow(2, prefixBits)
+	totalCombinations := math.Pow(2, float64(len(prefix))*6)
 
 	return common.ProbabilityStats{
-		P75:        totalCombinations * math.Log(4),
-		P99:        totalCombinations * math.Log(100),
-		PrefixBits: prefixBits,
+		P75: totalCombinations * math.Log(4),
+		P99: totalCombinations * math.Log(100),
 	}
 }
 
