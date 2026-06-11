@@ -45,7 +45,7 @@ func splitmix64(x uint64) uint64 {
 var ntlmSeedCtr atomic.Uint64
 
 var ntlmScratchPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		seed := splitmix64(uint64(time.Now().UnixNano()) ^ ntlmSeedCtr.Add(1))
 		if seed == 0 {
 			seed = 0x9e3779b97f4a7c15
@@ -63,7 +63,7 @@ var ntlmScratchPool = sync.Pool{
 // into one little-endian 32-bit word as pw[2j] | pw[2j+1]<<16.
 func md4Block32(pw *[16]byte) [16]byte {
 	var x [16]uint32
-	for j := 0; j < 8; j++ {
+	for j := range 8 {
 		x[j] = uint32(pw[2*j]) | uint32(pw[2*j+1])<<16
 	}
 	// x[8] holds the 0x80 padding byte; x[14] is the bit length (32 bytes =
@@ -82,7 +82,7 @@ func md4Block32(pw *[16]byte) [16]byte {
 	// Round 1: F(b,c,d) = (b&c)|(^b&d), shifts 3,7,11,19, k = 0..15.
 	{
 		shift := [4]uint{3, 7, 11, 19}
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			f := (c^d)&b ^ d
 			a += f + x[i]
 			a = bits.RotateLeft32(a, int(shift[i&3]))
@@ -93,7 +93,7 @@ func md4Block32(pw *[16]byte) [16]byte {
 	{
 		shift := [4]uint{3, 5, 9, 13}
 		idx := [16]uint{0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15}
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			g := b&c | b&d | c&d
 			a += g + x[idx[i]] + 0x5a827999
 			a = bits.RotateLeft32(a, int(shift[i&3]))
@@ -104,7 +104,7 @@ func md4Block32(pw *[16]byte) [16]byte {
 	{
 		shift := [4]uint{3, 9, 11, 15}
 		idx := [16]uint{0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15}
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			h := b ^ c ^ d
 			a += h + x[idx[i]] + 0x6ed9eba1
 			a = bits.RotateLeft32(a, int(shift[i&3]))

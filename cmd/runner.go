@@ -71,9 +71,7 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 
 	// Start worker goroutines with batching to reduce context switching
 	for range numCPU {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			const batchSize = 1000    // Process in batches to reduce cancellation checks
 			const flushInterval = 100 // Flush local counter to shared atomic every N iterations
 
@@ -89,7 +87,7 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 				}
 
 				// Process a batch of generations
-				for batch := 0; batch < batchSize; batch++ {
+				for range batchSize {
 					result, ok := generator.TryMatch(prefix)
 					localAttempts++
 
@@ -112,7 +110,7 @@ func runSingleSearch(generator common.Generator, prefix string) []common.Result 
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	// Result collection goroutine
@@ -168,10 +166,8 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 	var wg sync.WaitGroup
 
 	// Start worker goroutines with batching
-	for i := 0; i < numCPU; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numCPU {
+		wg.Go(func() {
 			const batchSize = 1000    // Process in batches
 			const flushInterval = 100 // Flush local counters to shared atomics every N iterations
 
@@ -188,7 +184,7 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 				}
 
 				// Process a batch of generations
-				for batch := 0; batch < batchSize; batch++ {
+				for range batchSize {
 					result, ok := generator.TryMatch(prefix)
 					localAttempts++
 					localCurrent++
@@ -221,7 +217,7 @@ func runMultiSearch(generator common.Generator, prefix string, numResults int) [
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	// Stats rendering loop

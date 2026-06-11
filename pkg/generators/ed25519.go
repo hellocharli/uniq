@@ -64,7 +64,7 @@ type edScratch struct {
 
 // scratchPool holds per-P edScratch instances so workers don't share state.
 var scratchPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		// pos == len(buf) forces an entropy refill on first use.
 		s := &edScratch{h: sha256.New()}
 		s.rand.pos = randBufSize

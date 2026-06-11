@@ -50,10 +50,7 @@ func PrintStats(stats *common.Stats, generator common.Generator, prefix string) 
 	line2Left := fmt.Sprintf("P99: %.0f", probStats.P99)
 
 	// Find the maximum length to align the vertical bars
-	maxLeftLen := len(line1Left)
-	if len(line2Left) > maxLeftLen {
-		maxLeftLen = len(line2Left)
-	}
+	maxLeftLen := max(len(line2Left), len(line1Left))
 
 	// Pad each line to align the vertical bars
 	line1Left = fmt.Sprintf("%-*s", maxLeftLen, line1Left)
@@ -176,10 +173,7 @@ func PrintMultiResults(foundResults []common.FoundResult, generator common.Gener
 
 	for i, foundResult := range foundResults {
 		// Calculate elapsed time
-		elapsed := time.Duration(foundResult.Attempts) * time.Microsecond
-		if elapsed < time.Millisecond {
-			elapsed = time.Millisecond
-		}
+		elapsed := max(time.Duration(foundResult.Attempts)*time.Microsecond, time.Millisecond)
 
 		// Format time in a human readable way
 		var timeStr string
