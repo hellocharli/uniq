@@ -8,6 +8,7 @@ import (
 )
 
 var numResults int
+var forceCPU bool
 
 var rootCmd = &cobra.Command{
 	Use:   "uniq",
@@ -25,6 +26,7 @@ func Execute() {
 func init() {
 	// Global flag that works with any subcommand
 	rootCmd.PersistentFlags().IntVarP(&numResults, "number", "n", 1, "number of results to generate")
+	rootCmd.PersistentFlags().BoolVar(&forceCPU, "cpu", false, "force CPU (disable GPU acceleration)")
 
 	rootCmd.AddCommand(ntlmCmd)
 	rootCmd.AddCommand(ed25519Cmd)

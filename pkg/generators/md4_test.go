@@ -10,7 +10,7 @@ import (
 // reference NTLM hash via the same path the old implementation used.
 func refNTLM(pw [16]byte) [16]byte {
 	var u16 [32]byte
-	for i := range(16) {
+	for i := range 16 {
 		u16[i*2] = pw[i]
 	}
 	h := md4.New()

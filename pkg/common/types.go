@@ -30,6 +30,19 @@ type Generator interface {
 	GetRateUnit() string
 }
 
+// BatchSearcher is an optional capability a Generator can implement to run
+// trials in large batches (e.g. on a GPU) instead of one candidate at a time.
+// When a Generator also implements BatchSearcher, the runner drives it with a
+// single batch loop rather than per-core TryMatch goroutines.
+type BatchSearcher interface {
+	// SearchBatch runs one batch of trials for prefix and returns any matching
+	// results plus the number of candidates tried in the batch.
+	SearchBatch(prefix string) (results []Result, tried int64, err error)
+
+	// Close releases any resources held by the searcher.
+	Close()
+}
+
 // Result represents a generated key/hash result
 type Result interface {
 	// GetDetails returns additional details to display
@@ -40,6 +53,7 @@ type Result interface {
 type FoundResult struct {
 	Result   Result
 	Attempts int64
+	Elapsed  time.Duration // wall-clock time to find this result
 }
 
 // ProbabilityStats contains probability calculations
@@ -100,6 +114,7 @@ func (ms *MultiStats) AddResult(result Result) {
 	foundResult := FoundResult{
 		Result:   result,
 		Attempts: ms.CurrentAttempts.Load(),
+		Elapsed:  time.Since(ms.CurrentStartTime),
 	}
 
 	ms.FoundResults = append(ms.FoundResults, foundResult)

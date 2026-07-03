@@ -50,6 +50,10 @@ func runGenerator(generator common.Generator, prefix string, numResults int) {
 }
 
 func runSingleSearch(generator common.Generator, prefix string) []common.Result {
+	if bs, ok := generator.(common.BatchSearcher); ok {
+		return runSingleSearchBatch(bs, generator, prefix)
+	}
+
 	stats := common.NewStats()
 	var results []common.Result
 	var resultsMutex sync.Mutex
@@ -150,6 +154,10 @@ statsLoop:
 }
 
 func runMultiSearch(generator common.Generator, prefix string, numResults int) []common.FoundResult {
+	if bs, ok := generator.(common.BatchSearcher); ok {
+		return runMultiSearchBatch(bs, generator, prefix)
+	}
+
 	multiStats := common.NewMultiStats(numResults)
 	var resultsMutex sync.Mutex
 
@@ -238,6 +246,128 @@ statsLoop:
 	}
 
 	// Final stats print
+	ui.PrintMultiStats(multiStats, generator, prefix)
+
+	wg.Wait()
+
+	return multiStats.FoundResults
+}
+
+// runSingleSearchBatch drives a BatchSearcher (e.g. the Metal GPU engine) with
+// a single batch loop instead of per-core TryMatch goroutines.
+func runSingleSearchBatch(bs common.BatchSearcher, generator common.Generator, prefix string) []common.Result {
+	stats := common.NewStats()
+	var results []common.Result
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+		stats.Cancel()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stats.Context.Done():
+				return
+			default:
+			}
+
+			res, tried, err := bs.SearchBatch(prefix)
+			stats.Attempts.Add(tried)
+			if err != nil {
+				stats.Cancel()
+				return
+			}
+			if len(res) > 0 {
+				// Sole writer; main reads results only after wg.Wait.
+				results = append(results, res[0])
+				stats.Cancel()
+				return
+			}
+		}
+	})
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	fmt.Print("\n\n\n")
+
+statsLoop:
+	for {
+		select {
+		case <-stats.Context.Done():
+			break statsLoop
+		case <-ticker.C:
+			ui.PrintStats(stats, generator, prefix)
+		}
+	}
+
+	ui.PrintStats(stats, generator, prefix)
+
+	wg.Wait()
+
+	return results
+}
+
+// runMultiSearchBatch drives a BatchSearcher for multi-result searches. A
+// single dispatch may yield several matches, which are all recorded.
+func runMultiSearchBatch(bs common.BatchSearcher, generator common.Generator, prefix string) []common.FoundResult {
+	multiStats := common.NewMultiStats(numResults)
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+		multiStats.Cancel()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-multiStats.Context.Done():
+				return
+			default:
+			}
+
+			res, tried, err := bs.SearchBatch(prefix)
+			multiStats.Attempts.Add(tried)
+			multiStats.CurrentAttempts.Add(tried)
+			if err != nil {
+				multiStats.Cancel()
+				return
+			}
+			for _, r := range res {
+				if multiStats.IsComplete() {
+					break
+				}
+				multiStats.AddResult(r)
+			}
+			if multiStats.IsComplete() {
+				multiStats.Cancel()
+				return
+			}
+		}
+	})
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	fmt.Print("\n\n\n\n")
+
+statsLoop:
+	for {
+		select {
+		case <-multiStats.Context.Done():
+			break statsLoop
+		case <-ticker.C:
+			ui.PrintMultiStats(multiStats, generator, prefix)
+		}
+	}
+
 	ui.PrintMultiStats(multiStats, generator, prefix)
 
 	wg.Wait()

@@ -172,8 +172,8 @@ func PrintMultiResults(foundResults []common.FoundResult, generator common.Gener
 	fmt.Printf("\n")
 
 	for i, foundResult := range foundResults {
-		// Calculate elapsed time
-		elapsed := max(time.Duration(foundResult.Attempts)*time.Microsecond, time.Millisecond)
+		// Real wall-clock time taken to find this result.
+		elapsed := foundResult.Elapsed
 
 		// Format time in a human readable way
 		var timeStr string
